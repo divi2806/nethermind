@@ -310,6 +310,39 @@ public class ReceiptsSyncFeedTests
         _feed.IsFinished.Should().BeTrue();
     }
 
+    /// <summary>
+    /// Regression test for https://github.com/NethermindEth/nethermind/issues/9002.
+    /// When AncientReceiptsBarrier is decreased to a value smaller than a previous partial sync's
+    /// LowestInsertedReceiptBlockNumber, the feed must NOT consider itself finished and must
+    /// continue downloading receipts down to the new (lower) barrier.
+    /// </summary>
+    [Test]
+    public void When_AncientReceiptsBarrier_decreased_after_partial_sync_feed_is_not_finished()
+    {
+        // Simulate: previous run downloaded receipts from pivot (1024) down to block 768.
+        // (e.g. old buggy code had barrier=1 so the run was working toward block 1, got to 768)
+        _syncConfig.AncientBodiesBarrier = 256;
+        _syncConfig.AncientReceiptsBarrier = 256;
+
+        // HasPivot checks whether receipts for the pivot block are stored.
+        // Returning true here means a previous run DID start receipt sync (as expected in #9002).
+        _receiptStorage.HasBlock(Arg.Is(_pivotNumber), Arg.Any<Hash256>()).Returns(true);
+
+        // LowestInsertedReceiptBlockNumber = 768: previous sync reached this point.
+        _syncPointers.LowestInsertedReceiptBlockNumber = 768;
+
+        _feed = CreateFeed();
+        _feed.InitializeFeed();
+
+        // With new barrier = 256 and LowestInserted = 768, receipts 767..256 are still missing.
+        // The feed must NOT be finished (regression: old code gave barrier=1, so after decreasing
+        // the config barrier the computed barrier was still 1, and AllDownloaded was false for a
+        // completely different reason; with the fix, AllDownloaded = 768 <= 256 = false, correctly
+        // keeping the feed active).
+        _feed.IsFinished.Should().BeFalse(
+            "barrier was decreased: receipts in range 256..767 still need to be downloaded");
+    }
+
     private void LoadScenario(Scenario scenario) =>
         LoadScenario(scenario, _syncConfig);
 

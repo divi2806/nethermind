@@ -243,6 +243,46 @@ public class BodiesSyncFeedTests
         _feed.IsFinished.Should().BeTrue();
     }
 
+    /// <summary>
+    /// Regression test for https://github.com/NethermindEth/nethermind/issues/9002.
+    /// When AncientBodiesBarrier is decreased to a value smaller than a previous partial sync's
+    /// LowestInsertedBodyNumber, the feed must NOT consider itself finished and must continue
+    /// downloading the remaining range down to the new (lower) barrier.
+    /// Before the fix in #11410 the barrier was computed using _syncConfig.PivotNumber which is 0
+    /// on Hoodi (dynamic pivot), giving barrier=1 regardless of the configured value.
+    /// After the fix, barrier is computed using _blockTree.SyncPivot.BlockNumber, so decreasing the
+    /// configured barrier correctly re-opens the download range.
+    /// </summary>
+    [Test]
+    public async Task When_AncientBodiesBarrier_decreased_after_partial_sync_feed_resumes_download()
+    {
+        // Simulate: previous run downloaded bodies from pivot (99) down to block 60.
+        // (e.g. with old buggy code barrier was always 1 so the old run was still going all the way down)
+        for (int i = 60; i <= 99; i++)
+        {
+            _syncingToBlockTree.Insert(_syncingFromBlockTree.FindBlock(i, BlockTreeLookupOptions.None)!);
+        }
+        _syncPointers.LowestInsertedBodyNumber = 60;
+
+        // Now restart with a smaller, realistic barrier.
+        _syncConfig.AncientBodiesBarrier = 40;
+        _feed.InitializeFeed();
+
+        // Bodies 59..40 are not yet downloaded, so the feed must NOT be finished.
+        _feed.IsFinished.Should().BeFalse("barrier was decreased: bodies in range 40..59 still need to be downloaded");
+
+        // Feed must produce a non-null batch for the remaining range, not be stuck.
+        using BodiesSyncBatch? batch = await _feed.PrepareRequest();
+        batch.Should().NotBeNull("feed must request the still-missing bodies below the old LowestInsertedBodyNumber");
+        batch!.Infos
+            .Where(static i => i is not null)
+            .Should().AllSatisfy(i =>
+            {
+                i!.BlockNumber.Should().BeInRange(40, 59,
+                    "only blocks between new barrier and previous lowest-inserted need downloading");
+            });
+    }
+
     [Test]
     public async Task ShouldLimitBatchSizeToPeerEstimate()
     {
